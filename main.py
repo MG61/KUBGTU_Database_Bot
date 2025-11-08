@@ -10,43 +10,7 @@ bot = telebot.TeleBot(API_KEY)
 # Храним дисциплины для каждого пользователя
 user_disciplines = {}
 
-
-# ------------------ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ------------------
-
-def get_user_file(user_id):
-    """Возвращает путь к файлу конкретного пользователя."""
-    return f"competencies_{user_id}.docx"
-
-
-def extract_disciplines(file_path):
-    """Извлекает дисциплины из всего .docx файла (анализирует весь текст полностью)."""
-    full_text = docx2txt.process(file_path)
-
-    # Показываем только краткую статистику, без вывода текста
-    print("📘 Текст успешно считан. Общая длина:", len(full_text), "символов")
-
-    # Универсальная регулярка под любые варианты:
-    # Б1Б / Б2ВЭ / Б3ГИА / и т.д. + любые пробелы и УК
-    pattern = r"(Б\d{1,2}[А-ЯA-Za-zа-яёЁ]*\s*\d*\s*[А-ЯA-Za-zа-яёЁ0-9,\-–\s]+?\(УК\s*[\d.\sА-Яа-яA-Za-z]*\))"
-
-    matches = re.findall(pattern, full_text)
-
-    print("🔍 Найдено дисциплин:", len(matches))
-    for i, m in enumerate(matches[:10]):
-        print(f"{i+1}: {m}")
-
-    disciplines = [" ".join(m.split()) for m in matches]
-    return disciplines
-
-
-
-def main_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("📂 Загрузить компетенции", "🗑 Удалить файл")
-    return kb
-
-
-# ------------------ /START ------------------
+# Обработка команды /start
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.send_message(
@@ -61,12 +25,13 @@ def start(message):
     )
 
 
-# ------------------ ОБРАБОТКА ТЕКСТА ------------------
+
+# Обработка входящего текста
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     text = message.text.strip().lower()
     user_id = message.from_user.id
-    user_file = get_user_file(user_id)
+    user_file = f"competencies_{user_id}.docx"
 
     # --- ЗАГРУЗКА ФАЙЛА ---
     if text == "📂 загрузить компетенции":
@@ -113,11 +78,11 @@ def handle_text(message):
     bot.send_message(message.chat.id, result_text, reply_markup=main_keyboard())
 
 
-# ------------------ ОБРАБОТКА ДОКУМЕНТА ------------------
+# Обработка входящих документов
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     user_id = message.from_user.id
-    user_file = get_user_file(user_id)
+    user_file = f"competencies_{user_id}.docx"
 
     file_name = message.document.file_name
     if not file_name.endswith(".docx"):
@@ -136,8 +101,31 @@ def handle_document(message):
 
     bot.send_message(message.chat.id, f"✅ Файл успешно загружен! Найдено {len(disciplines)} дисциплин.", reply_markup=main_keyboard())
 
+def extract_disciplines(file_path):
+    """Извлекает дисциплины из всего .docx файла (анализирует весь текст полностью)."""
+    full_text = docx2txt.process(file_path)
 
-# ------------------ ЗАПУСК ------------------
+    # Показываем только краткую статистику, без вывода текста
+    print("📘 Текст успешно считан. Общая длина:", len(full_text), "символов")
+
+    # Универсальная регулярка под любые варианты:
+    # Б1Б / Б2ВЭ / Б3ГИА / и т.д. + любые пробелы и УК
+    pattern = r"(Б\d{1,2}[А-ЯA-Za-zа-яёЁ]*\s*\d*\s*[А-ЯA-Za-zа-яёЁ0-9,\-–\s]+?\(УК\s*[\d.\sА-Яа-яA-Za-z]*\))"
+
+    matches = re.findall(pattern, full_text)
+
+    print("🔍 Найдено дисциплин:", len(matches))
+    for i, m in enumerate(matches[:10]):
+        print(f"{i+1}: {m}")
+
+    disciplines = [" ".join(m.split()) for m in matches]
+    return disciplines
+
+def main_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("📂 Загрузить компетенции", "🗑 Удалить файл")
+    return kb
+
 if __name__ == "__main__":
     print("🤖 Бот запущен...")
     bot.polling(none_stop=True)
