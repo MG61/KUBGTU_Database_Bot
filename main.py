@@ -9,6 +9,7 @@ bot = telebot.TeleBot(API_KEY)
 
 # Храним дисциплины для каждого пользователя
 user_disciplines = {}
+user_competencies = {}
 
 # Обработка команды /start
 @bot.message_handler(commands=['start'])
@@ -23,8 +24,6 @@ def start(message):
         "Выбери действие 👇",
         reply_markup=main_keyboard()
     )
-
-
 
 # Обработка входящего текста
 @bot.message_handler(content_types=['text'])
@@ -43,6 +42,7 @@ def handle_text(message):
         if os.path.exists(user_file):
             os.remove(user_file)
             user_disciplines.pop(user_id, None)
+            user_competencies.pop(user_id, None)
             bot.send_message(message.chat.id, "✅ Ваш файл успешно удалён.", reply_markup=main_keyboard())
         else:
             bot.send_message(message.chat.id, "⚠️ У вас ещё нет загруженного файла.", reply_markup=main_keyboard())
@@ -61,6 +61,10 @@ def handle_text(message):
             return
         user_disciplines[user_id] = disciplines
 
+    if user_id not in user_competencies:
+        competencies = extract_competencies(user_file)
+        user_competencies[user_id] = competencies
+
     # --- ПОИСК ---
     disciplines = user_disciplines[user_id]
     found = [d for d in disciplines if text in d.lower()]
@@ -73,9 +77,40 @@ def handle_text(message):
         )
         return
 
-    # --- РЕЗУЛЬТАТ ---
-    result_text = "📚 Найдено совпадений:\n\n" + "\n\n".join([f"📘 {f}" for f in found])
-    bot.send_message(message.chat.id, result_text, reply_markup=main_keyboard())
+    # --- ВЫВОД ДИСЦИПЛИН ---
+    result_lines = [f"📘 {d}" for d in found]
+    bot.send_message(message.chat.id, "📚 Найдено совпадений:\n\n" + "\n\n".join(result_lines), reply_markup=main_keyboard())
+
+    # --- ВЫВОД КОМПЕТЕНЦИЙ (с повторениями и группировкой по дисциплинам) ---
+    competencies = user_competencies.get(user_id, {})
+
+    response_lines = []
+
+    for d in found:
+        response_lines.append(f"📘 *{d}*")
+        uk_codes = re.findall(r"УК\s*\d+\.\d", d)
+        if not uk_codes:
+            response_lines.append("⚠️ Нет компетенций для этой дисциплины.\n")
+            continue
+
+        for uk in uk_codes:
+            uk_key = uk.replace(" ", "")
+            if uk_key in competencies:
+                response_lines.append(f"📗 {competencies[uk_key]}")
+            else:
+                response_lines.append(f"⚠️ {uk} — описание не найдено.")
+        response_lines.append("")  # пустая строка между дисциплинами
+
+    if len(response_lines) == 0:
+        bot.send_message(message.chat.id, "⚠️ Не удалось определить компетенции для этих дисциплин.")
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "📖 *Компетенции, связанные с найденными дисциплинами:*\n\n" + "\n".join(response_lines),
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
 
 
 # Обработка входящих документов
@@ -99,7 +134,15 @@ def handle_document(message):
     disciplines = extract_disciplines(user_file)
     user_disciplines[user_id] = disciplines
 
-    bot.send_message(message.chat.id, f"✅ Файл успешно загружен! Найдено {len(disciplines)} дисциплин.", reply_markup=main_keyboard())
+    # Извлекаем компетенции (УК)
+    competencies = extract_competencies(user_file)
+    user_competencies[user_id] = competencies
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ Файл успешно загружен! Найдено {len(disciplines)} дисциплин и {len(competencies)} компетенций.",
+        reply_markup=main_keyboard()
+    )
 
 def extract_disciplines(file_path):
     """Извлекает дисциплины из всего .docx файла (анализирует весь текст полностью)."""
@@ -120,6 +163,36 @@ def extract_disciplines(file_path):
 
     disciplines = [" ".join(m.split()) for m in matches]
     return disciplines
+
+def extract_competencies(file_path):
+    """Извлекает все УК и их описания из .docx, без дублей и мусора."""
+    full_text = docx2txt.process(file_path)
+
+    # Удаляем переносы строк, лишние пробелы
+    full_text = re.sub(r"\s+", " ", full_text)
+
+    # Новый шаблон:
+    # Находит "УК 7.3 ..." до следующего "УК ..." или "Б1Б", "Б2ВЭ", "Б3ГИА" (начало дисциплины)
+    pattern = r"(УК\s*\d+\.\d)(?:\s*[–-]?\s*)([^УБ]+)"
+    matches = re.findall(pattern, full_text)
+
+    competencies = {}
+    for code, desc in matches:
+        clean_code = code.replace(" ", "")
+        clean_desc = desc.strip()
+        # Отбрасываем мусор вроде "УК7.3 УК7.4"
+        if len(clean_desc) < 10 or "УК" in clean_desc[:10]:
+            continue
+        # Ограничим описание разумной длиной
+        if len(clean_desc) > 400:
+            clean_desc = clean_desc[:400].rsplit('.', 1)[0] + "..."
+        competencies[clean_code] = f"{code} — {clean_desc}"
+
+    print("📘 Найдено компетенций:", len(competencies))
+    for i, (k, v) in enumerate(list(competencies.items())[:5]):
+        print(f"{i+1}: {k} — {v[:100]}...")
+
+    return competencies
 
 def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
