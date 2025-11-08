@@ -6,6 +6,8 @@ import random
 import docx2txt
 from docx import Document
 from settings import API_KEY
+from docx.shared import Pt
+from docx.oxml.ns import qn
 
 bot = telebot.TeleBot(API_KEY)
 
@@ -330,49 +332,141 @@ def extract_questions(file_path):
 
 
 # ---------- ГЕНЕРАЦИЯ ----------
+def extract_program_info(file_path):
+    """Извлекает направление и профиль из документа компетенций"""
+    full_text = docx2txt.process(file_path)
+    direction = ""
+    profile = ""
+
+    # Ищем строку вида: "по направлению 09.03.01   Информатика и вычислительная техника, профиль - ЭВМ, комплексы, системы и сети"
+    match = re.search(
+        r"по\s+направлению\s+([\d\.]+\s*[А-Яа-яA-Za-zёЁ\s,]+?)\s*,?\s*профиль\s*[-–—]\s*([А-Яа-яA-Za-zёЁ\s,]+)",
+        full_text
+    )
+    if match:
+        direction = match.group(1).strip()
+        profile = match.group(2).strip()
+
+    return direction, profile
+
 def generate_files_per_discipline(user_dir, disciplines, competencies, questions):
     generated = []
 
+    comp_file = os.path.join(user_dir, "competencies.docx")
+    direction, profile = extract_program_info(comp_file)
+
+    # --- Удаляем возможные вкрапления "Год набора ..." ---
+    direction = re.sub(r"год[^\n]*", "", direction, flags=re.IGNORECASE).strip()
+    profile = re.sub(r"год[^\n]*", "", profile, flags=re.IGNORECASE).strip()
+
+    if not direction:
+        direction = "Направление не указано"
+    if not profile:
+        profile = "Профиль не указан"
+
     for disc in disciplines:
         doc = Document()
-        question_counter = 1  # общая нумерация по дисциплине
+        question_counter = 1
 
-        # Ищем все УК в названии дисциплины
-        uk_codes = re.findall(r"(УК\s*\d+\.\d)", disc)
+        # --- Устанавливаем стиль документа (Times New Roman, 14 pt) ---
+        style = doc.styles['Normal']
+        font = style.font
+        font.name = 'Times New Roman'
+        font.size = Pt(14)
+        style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
 
-        for uk in uk_codes:
+        # --- Название дисциплины ---
+        discipline_match = re.search(r"(Б\d+[А-ЯA-Za-zа-яёЁ0-9\s,\-–]+)", disc)
+        discipline_name = discipline_match.group(1).strip() if discipline_match else "Неизвестная дисциплина"
+
+        # --- Ищем коды компетенций ---
+        comp_codes = re.findall(r"((?:УК|ОПК|ПК)\s*\d+(?:\.\d+)?)", disc)
+        if comp_codes:
+            base = re.match(r"((?:УК|ОПК|ПК)\s*\d+)", comp_codes[0])
+            short_comp_code = base.group(1).strip() if base else comp_codes[0]
+        else:
+            short_comp_code = "Компетенция не указана"
+
+        # --- Шапка документа ---
+        doc.add_paragraph(f"Задания для компьютерного тестирования по компетенции {short_comp_code}")
+        doc.add_paragraph(f"по дисциплине {discipline_name}")
+        doc.add_paragraph(f"Направление {direction}")
+        doc.add_paragraph(f"Профиль {profile}")
+        doc.add_paragraph()
+
+        # --- Таблица с индикаторами ---
+        if comp_codes:
+            table = doc.add_table(rows=len(comp_codes) + 1, cols=3)
+            table.style = 'Table Grid'
+
+            # Заголовки
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Код компетенции"
+            hdr_cells[1].text = "Код индикатора"
+            hdr_cells[2].text = "Номера вопросов"
+
+            for i, full_code in enumerate(comp_codes, start=1):
+                row = table.rows[i].cells
+                base_code = re.match(r"((?:УК|ОПК|ПК)\s*\d+)", full_code).group(1)
+                row[0].text = base_code if i == 1 else ""
+                row[1].text = full_code.replace(" ", "")
+                row[2].text = f"{(i - 1) * 15 + 1}–{i * 15}"
+
+            # Применяем шрифт Times New Roman 14 ко всем ячейкам
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        for r in p.runs:
+                            r.font.name = 'Times New Roman'
+                            r._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+                            r.font.size = Pt(14)
+        else:
+            table = doc.add_table(rows=3, cols=3)
+            table.style = 'Table Grid'
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Код компетенции"
+            hdr_cells[1].text = "Код индикатора"
+            hdr_cells[2].text = "Номера вопросов"
+            table.rows[1].cells[0].text = short_comp_code
+            table.rows[1].cells[1].text = f"{short_comp_code}.1"
+            table.rows[1].cells[2].text = "1–15"
+            table.rows[2].cells[1].text = f"{short_comp_code}.2"
+            table.rows[2].cells[2].text = "16–30"
+
+        doc.add_paragraph("\n")
+
+        # --- Основная часть: компетенции и вопросы ---
+        for uk in comp_codes:
             uk_key = uk.replace(" ", "")
             if uk_key in competencies:
-                # Извлекаем описание и убираем дублирование кода и лишние тире
                 desc = competencies[uk_key]
-                desc = re.sub(r"^УК\s*\d+\.\d\s*[–-]?\s*", "", desc).strip()
-                desc = desc.lstrip("—").strip()  # убираем начальное тире
+                desc = re.sub(r"^" + re.escape(uk) + r"\s*[–-]?\s*", "", desc).strip()
+                desc = desc.lstrip("—").strip()
 
-                # Добавляем жирный центрированный заголовок: УК + описание
                 p = doc.add_paragraph()
-                run = p.add_run(f"УК {uk_key.split('УК')[-1].strip()} — {desc}")
+                run = p.add_run(f"{uk} — {desc}")
                 run.bold = True
-                p.alignment = 1  # 1 = центрирование
+                p.alignment = 1
 
-                # Пустая строка перед вопросами
                 doc.add_paragraph()
 
-                # 15 случайных вопросов, нумерация вручную (без стиля "List Number")
                 selected = random.sample(questions, min(15, len(questions)))
                 for q in selected:
                     doc.add_paragraph(f"{question_counter}. {q}")
                     question_counter += 1
 
-                # Раздел между компетенциями
                 doc.add_paragraph("\n")
 
-        # Сохраняем файл
+        # --- Сохраняем файл ---
         filename = re.sub(r"[^A-Za-zА-Яа-я0-9]", "_", disc[:40]) + ".docx"
         file_path = os.path.join(user_dir, filename)
         doc.save(file_path)
         generated.append(file_path)
 
     return generated
+
+
+
 
 
 # ---------- MAIN ----------
