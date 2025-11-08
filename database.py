@@ -101,14 +101,12 @@ def extract_questions(file_path):
     # Очистка
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n{2,}', '\n\n', text)
-
     debug.append(f"📄 Длина текста: {len(text)} символов")
 
     sections = ["ЕВ", "МВ", "ЧВ", "Соответствие",
                 "Одно пропущенное слово", "Два пропущенных слова", "Вложенные вопросы"]
 
-    categorized = {}
-    current = None
+    categorized, current = {}, None
     for line in text.splitlines():
         stripped = line.strip()
         if stripped in sections:
@@ -119,43 +117,56 @@ def extract_questions(file_path):
 
     debug.append(f"📚 Найдено разделов: {list(categorized.keys())}")
 
-    # --- Регулярки ---
-
+    # ----------------------------------------------------------
     def normalize_options(options):
-        """Оставляем максимум 4 непустых строки"""
         opts = [o.strip() for o in options.splitlines() if o.strip()]
         return "\n".join(opts[:4])
+    # ----------------------------------------------------------
 
-    # ЕВ и МВ: вопрос + до 4 ответов (берём максимум 8 строк после вопроса)
+    # ЕВ / МВ
     def find_ev(text):
-        pattern = r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})"
-        matches = re.findall(pattern, text, re.DOTALL)
-        return [(q.strip(), normalize_options(opts)) for q, opts in matches]
+        matches = re.findall(r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})", text, re.DOTALL)
+        return [(q.strip(), normalize_options(o)) for q, o in matches]
 
     def find_mv(text):
-        pattern = r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})"
-        matches = re.findall(pattern, text, re.DOTALL)
-        return [(q.strip(), normalize_options(opts)) for q, opts in matches]
+        matches = re.findall(r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})", text, re.DOTALL)
+        return [(q.strip(), normalize_options(o)) for q, o in matches]
 
     # ЧВ
     def find_chv(text):
-        pattern = r"([^\n]+?\(Введите[^\n]+?\))\s*\n\s*=\s*([^\n]+)"
-        return re.findall(pattern, text, re.DOTALL)
+        return re.findall(r"([^\n]+?\(Введите[^\n]+?\))\s*\n\s*=\s*([^\n]+)", text, re.DOTALL)
 
     # Соответствие
     def find_matching(text):
-        pattern = r"(Установите соответствие.+?(?=(?:\nУстановите соответствие|$)))"
-        return re.findall(pattern, text, re.DOTALL)
+        blocks = re.findall(r"(Установите соответствие.+?(?=(?:\nУстановите соответствие|$)))", text, re.DOTALL)
+        return [re.sub(r'\n{2,}', '\n', b).strip() for b in blocks]
 
-    # Пропуски и вложенные
+    # Одно пропущенное слово
     def find_one_gap(text):
         return re.findall(r"([^\n]+?\(Введите[^\n]+?\))", text)
 
+    # Два пропущенных слова — теперь точно тянет блок с вариантами
     def find_two_gap(text):
-        return re.findall(r"([^\n]*\[\[1\]\].+?\[\[2\]\].+?(?:\n|$))", text)
+        blocks = re.findall(
+            r"([^\n]*\[\[1\]\].+?\[\[2\]\].+?(?:\n\s*\d*\s*1\s*=\s*[^\n]+(?:\n\s*[^\n]*)*2\s*=\s*[^\n]+)?)",
+            text, re.DOTALL)
+        cleaned = []
+        for b in blocks:
+            b = re.sub(r'\n{2,}', '\n', b)
+            b = re.sub(r' {2,}', ' ', b)
+            cleaned.append(b.strip())
+        return cleaned
 
+    # Вложенные вопросы — убираем номера даже с пробелом
     def find_nested(text):
-        return re.findall(r"(\d+\s*\n.+?(?=\n\d+\s*\n|$))", text, re.DOTALL)
+        blocks = re.findall(r"(?:\s*\d+\s*\n)?(.+?(?=\n\s*\d+\s*\n|$))", text, re.DOTALL)
+        cleaned = []
+        for b in blocks:
+            b = re.sub(r'\n{2,}', '\n', b)
+            b = re.sub(r'^\s+|\s+$', '', b)
+            cleaned.append(b)
+        return cleaned
+    # ----------------------------------------------------------
 
     extractors = {
         "ЕВ": find_ev,
@@ -168,24 +179,20 @@ def extract_questions(file_path):
     }
 
     questions = {}
-    for k, func in extractors.items():
-        section_text = categorized.get(k, "")
-        if not section_text.strip():
-            debug.append(f"⚠️ Раздел {k} пуст.")
-            questions[k] = []
+    for key, func in extractors.items():
+        sec = categorized.get(key, "")
+        if not sec.strip():
+            debug.append(f"⚠️ Раздел {key} пуст.")
+            questions[key] = []
             continue
-        found = func(section_text)
-        debug.append(f"🔍 {k}: найдено {len(found)} вопросов")
-        questions[k] = found
+        found = func(sec)
+        debug.append(f"🔍 {key}: найдено {len(found)} вопросов")
+        questions[key] = found
 
     selection = {
-        "ЕВ": 4,
-        "МВ": 4,
-        "ЧВ": 2,
-        "Соответствие": 1,
-        "Одно пропущенное слово": 2,
-        "Два пропущенных слова": 1,
-        "Вложенные вопросы": 1
+        "ЕВ": 4, "МВ": 4, "ЧВ": 2,
+        "Соответствие": 1, "Одно пропущенное слово": 2,
+        "Два пропущенных слова": 1, "Вложенные вопросы": 1
     }
 
     result = []
@@ -197,12 +204,9 @@ def extract_questions(file_path):
 
         for q in sample:
             if key in ("ЕВ", "МВ") and isinstance(q, tuple):
-                question_text, options = q
-                opts_lines = [line.strip() for line in options.splitlines() if line.strip()]
-                full = f"{question_text}\n" + "\n".join(opts_lines[:4])
-                debug.append(f"✅ {key}: {len(opts_lines)} ответ(ов) найдено")
+                full = f"{q[0].strip()}\n" + "\n".join([l for l in q[1].splitlines() if l.strip()][:4])
             elif key == "ЧВ" and isinstance(q, tuple):
-                full = f"{q[0]}\n Ответ: {q[1]}"
+                full = f"{q[0]}\nОтвет: {q[1]}"
             else:
                 full = q.strip()
             result.append(f"🟩 *{key}:*\n{full}\n")
@@ -213,6 +217,8 @@ def extract_questions(file_path):
     random.shuffle(result)
     debug.append(f"✅ Всего собрано вопросов: {len(result)}")
     return result[:15], "\n".join(debug)
+
+
 
 
 
