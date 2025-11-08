@@ -98,13 +98,15 @@ def extract_questions(file_path):
     except Exception as e:
         return None, f"Ошибка чтения файла: {e}"
 
-    # Очистка
+    # Очистка лишнего
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n{2,}', '\n\n', text)
     debug.append(f"📄 Длина текста: {len(text)} символов")
 
-    sections = ["ЕВ", "МВ", "ЧВ", "Соответствие",
-                "Одно пропущенное слово", "Два пропущенных слова", "Вложенные вопросы"]
+    sections = [
+        "ЕВ", "МВ", "ЧВ", "Соответствие",
+        "Одно пропущенное слово", "Два пропущенных слова", "Вложенные вопросы"
+    ]
 
     categorized, current = {}, None
     for line in text.splitlines():
@@ -117,13 +119,12 @@ def extract_questions(file_path):
 
     debug.append(f"📚 Найдено разделов: {list(categorized.keys())}")
 
-    # ----------------------------------------------------------
+    # ---------- ВСПОМОГАТЕЛЬНЫЕ ----------
     def normalize_options(options):
         opts = [o.strip() for o in options.splitlines() if o.strip()]
         return "\n".join(opts[:4])
-    # ----------------------------------------------------------
 
-    # ЕВ / МВ
+    # ---------- ЕВ / МВ ----------
     def find_ev(text):
         matches = re.findall(r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})", text, re.DOTALL)
         return [(q.strip(), normalize_options(o)) for q, o in matches]
@@ -132,46 +133,63 @@ def extract_questions(file_path):
         matches = re.findall(r"([^\n]+?\?)\s*\n((?:[^\n]*\n){2,8})", text, re.DOTALL)
         return [(q.strip(), normalize_options(o)) for q, o in matches]
 
-    # ЧВ
+    # ---------- ЧВ ----------
     def find_chv(text):
         return re.findall(r"([^\n]+?\(Введите[^\n]+?\))\s*\n\s*=\s*([^\n]+)", text, re.DOTALL)
 
-    # Соответствие
+    # ---------- Соответствие ----------
     def find_matching(text):
         blocks = re.findall(r"(Установите соответствие.+?(?=(?:\nУстановите соответствие|$)))", text, re.DOTALL)
         return [re.sub(r'\n{2,}', '\n', b).strip() for b in blocks]
 
-    # Одно пропущенное слово
+    # ---------- Одно пропущенное слово ----------
     def find_one_gap(text):
         return re.findall(r"([^\n]+?\(Введите[^\n]+?\))", text)
 
-    # Два пропущенных слова — теперь точно тянет блок с вариантами
+    # ---------- Два пропущенных слова ----------
     def find_two_gap(text):
-        blocks = re.findall(
-            r"([^\n]*\[\[1\]\].+?\[\[2\]\].+?(?:\n\s*\d*\s*1\s*=\s*[^\n]+(?:\n\s*[^\n]*)*2\s*=\s*[^\n]+)?)",
-            text, re.DOTALL)
-        cleaned = []
-        for b in blocks:
-            b = re.sub(r'\n{2,}', '\n', b)
-            b = re.sub(r' {2,}', ' ', b)
-            cleaned.append(b.strip())
-        return cleaned
+        """
+        Извлекает каждый блок 'Два пропущенных слова':
+        шаблон с [[1]] и [[2]] + все варианты 1= и 2=.
+        """
+        # Разбиваем на отдельные куски по началу каждого блока
+        blocks = re.split(r'(?=\n?.*?\[\[1\]\].*?\[\[2\]\])', text)
+        results = []
 
-    # Вложенные вопросы — убираем номера даже с пробелом
+        for block in blocks:
+            block = block.strip()
+            if not block or '[[1]]' not in block:
+                continue
+
+            # Находим сам шаблон (строку с [[1]] и [[2]])
+            main_part_match = re.search(r'([^\n]*\[\[1\]\].+?\[\[2\]\][^\n]*)', block)
+            if not main_part_match:
+                continue
+            main_part = main_part_match.group(1).strip()
+
+            # Ищем блок вариантов — теперь до конца второго списка
+            opt_match = re.search(
+                r'(1\s*=\s*[^\n]+(?:\n\s*(?!\d=)[^\n]+)*\n\s*2\s*=\s*[^\n]+(?:\n\s*(?!\[\[)[^\n]+)*)',
+                block,
+                re.DOTALL
+            )
+            options = ""
+            if opt_match:
+                options = "\n" + re.sub(r'\n{2,}', '\n', opt_match.group(1)).strip()
+
+            # Формируем итог
+            full = f"{main_part}\n{options}".strip()
+            results.append(full)
+
+        return list(dict.fromkeys(results))
+
+    # ---------- Вложенные ----------
     def find_nested(text):
         blocks = re.findall(r"(?:\s*\d+\s*\n)?(.+?(?=\n\s*\d+\s*\n|$))", text, re.DOTALL)
-        cleaned = []
-        for b in blocks:
-            b = re.sub(r'\n{2,}', '\n', b)
-            b = re.sub(r'^\s+|\s+$', '', b)
-            cleaned.append(b)
-        return cleaned
-    # ----------------------------------------------------------
+        return [re.sub(r'\n{2,}', '\n', b).strip() for b in blocks if b.strip()]
 
     extractors = {
-        "ЕВ": find_ev,
-        "МВ": find_mv,
-        "ЧВ": find_chv,
+        "ЕВ": find_ev, "МВ": find_mv, "ЧВ": find_chv,
         "Соответствие": find_matching,
         "Одно пропущенное слово": find_one_gap,
         "Два пропущенных слова": find_two_gap,
@@ -201,7 +219,6 @@ def extract_questions(file_path):
         if not pool:
             continue
         sample = random.sample(pool, min(count, len(pool)))
-
         for q in sample:
             if key in ("ЕВ", "МВ") and isinstance(q, tuple):
                 full = f"{q[0].strip()}\n" + "\n".join([l for l in q[1].splitlines() if l.strip()][:4])
@@ -217,6 +234,7 @@ def extract_questions(file_path):
     random.shuffle(result)
     debug.append(f"✅ Всего собрано вопросов: {len(result)}")
     return result[:15], "\n".join(debug)
+
 
 
 
