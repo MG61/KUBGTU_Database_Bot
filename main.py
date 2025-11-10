@@ -126,25 +126,27 @@ def handle_text(message):
         return
 
     # --- вывод совпадений ---
-    bot.send_message(message.chat.id, "📚 Найдено совпадений:\n\n" + "\n\n".join([f"📘 {d}" for d in found]))
+    send_long_message(message.chat.id, "📚 Найдено совпадений:\n\n" + "\n\n".join([f"📘 {d}" for d in found]))
 
     # --- компетенции по найденным дисциплинам ---
     response_lines = []
     for d in found:
         response_lines.append(f"📘 *{d}*")
-        uk_codes = re.findall(r"УК\s*\d+\.\d", d)
-        if not uk_codes:
+        # ищем все типы компетенций (УК, ОПК, ПК) — поддержка глубины индексации (напр. 5.3.1)
+        comp_codes = re.findall(r"(?:УК|ОПК|ПК)\s*\d+(?:\.\d+)*", d)
+        if not comp_codes:
             response_lines.append("⚠️ Нет компетенций для этой дисциплины.\n")
             continue
-        for uk in uk_codes:
-            uk_key = uk.replace(" ", "")
-            if uk_key in competencies:
-                response_lines.append(f"📗 {competencies[uk_key]}")
+        for comp in comp_codes:
+            comp_key = comp.replace(" ", "")
+            desc = find_comp_desc(comp_key, competencies)
+            if desc:
+                response_lines.append(f"📗 {desc}")
             else:
-                response_lines.append(f"⚠️ {uk} — описание не найдено.")
+                response_lines.append(f"⚠️ {comp} — описание не найдено.")
         response_lines.append("")
 
-    bot.send_message(
+    send_long_message(
         message.chat.id,
         "📖 *Компетенции, связанные с найденными дисциплинами:*\n\n" + "\n".join(response_lines),
         parse_mode="Markdown",
@@ -215,7 +217,8 @@ def handle_document(message):
 def extract_disciplines(file_path):
     full_text = docx2txt.process(file_path)
     print("📘 Текст успешно считан. Общая длина:", len(full_text))
-    pattern = r"(Б\d{1,2}[А-ЯA-Za-zа-яёЁ]*\s*\d*\s*[А-ЯA-Za-zа-яёЁ0-9,\-–\s]+?\(УК\s*[\d.\sА-Яа-яA-Za-z]*\))"
+    # Поддерживаем УК, ОПК и ПК в скобках у дисциплины
+    pattern = r"(Б\d{1,2}[А-ЯA-Za-zа-яёЁ]*\s*\d*\s*[А-ЯA-Za-zа-яёЁ0-9,\-–\s]+?\((?:УК|ОПК|ПК)\s*[\d.\sА-Яа-яA-ZazlёЁ]*\))"
     matches = re.findall(pattern, full_text)
     print("🔍 Найдено дисциплин:", len(matches))
     disciplines = [" ".join(m.split()) for m in matches]
@@ -224,18 +227,143 @@ def extract_disciplines(file_path):
 
 def extract_competencies(file_path):
     full_text = docx2txt.process(file_path)
-    full_text = re.sub(r"\s+", " ", full_text)
-    pattern = r"(УК\s*\d+\.\d)(?:\s*[–-]?\s*)([^УБ]+)"
-    matches = re.findall(pattern, full_text)
+    # Сохраняем переводы строк, но убираем лишние пробелы/табуляции
+    cleaned = full_text.replace('\r', '')
+    cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+
+    # Находим все коды: УК, ОПК, ПК с одной или несколькими точками в номере (напр. 5.3 или 5.3.1 и т.д.)
+    code_re = re.compile(r"((?:УК|ОПК|ПК)\s*\d+(?:\.\d+)*)")
+    matches = list(code_re.finditer(cleaned))
+
+    # Шаблоны, указывающие на границы блоков, которые не являются описанием компетенции
+    stop_patterns = [
+        r"\n\s*Б\d",      # следующая дисциплина начинается с Б1...
+        r"\n\s*№\s",      # табличная нумерация/заголовок
+        r"Код и наименование", r"\bДисциплины\b", r"\bФГОС\b",
+        r"\bПС\b", r"\bБ3ГИА\b", r"\bДиректор\b", r"\bЗаведующий\b",
+        r"\bПреподаватель\b", r"\bСвязь со стандартами\b"
+    ]
+
+    # подстроки для усечения описания
+    stop_subs = [
+        '\nБ', '\n№', '№ ', 'Код и наименование', 'Дисциплины', 'ФГОС', 'ПС ', 'Б3ГИА',
+        'Директор', 'Заведующий', 'Преподаватель', 'Связь со стандартами', 'ПК-', 'УК-', 'ОПК-'
+    ]
+
     competencies = {}
-    for code, desc in matches:
-        clean_code = code.replace(" ", "")
-        clean_desc = desc.strip()
-        if len(clean_desc) < 10 or "УК" in clean_desc[:10]:
+    for i, m in enumerate(matches):
+        # Нормализуем найденный код: убираем завершающие точки/запятые/скобки
+        code_text_raw = m.group(1)
+        code_text = re.sub(r"[\.,;:\)\]]+$", "", code_text_raw).strip()
+
+        start = m.end()
+        next_code_start = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
+        end = next_code_start
+
+        # Ищем ближайший маркер-стоп среди стоп-шаблонов
+        for pat in stop_patterns:
+            mm = re.search(pat, cleaned[start:next_code_start])
+            if mm:
+                candidate = start + mm.start()
+                if candidate < end:
+                    end = candidate
+
+        # Также остановка на двойном переводе строки (новый блок)
+        mm = re.search(r"\n\s*\n", cleaned[start:next_code_start])
+        if mm:
+            candidate = start + mm.start()
+            if candidate < end:
+                end = candidate
+
+        # Попробуем остановиться на первом конце предложения в пределах разумного (200 символов)
+        snippet = cleaned[start:end]
+        sent = re.search(r"([\.\!?])\s+", snippet)
+        if sent and sent.start() < 200:
+            end = start + sent.end()
+
+        desc_raw = cleaned[start:end].strip()
+
+        # Нормализация: убираем ведущие разделители и вкрапления кодов
+        desc_raw = re.sub(r"^[\s:;\-–—]+", "", desc_raw)
+        desc_raw = re.sub(code_re, "", desc_raw).strip()
+
+        # Усечём по первым стоп-подстрокам, чтобы убрать вкрапления таблиц/заголовков
+        earliest = None
+        for s in stop_subs:
+            idx = desc_raw.find(s)
+            if idx != -1:
+                if earliest is None or idx < earliest:
+                    earliest = idx
+        if earliest is not None:
+            desc_raw = desc_raw[:earliest].strip()
+
+        # Разбиваем по строкам и убираем строки, которые выглядят как заголовки/номера
+        lines = [ln.strip() for ln in desc_raw.splitlines() if ln.strip()]
+        clean_lines = []
+        for ln in lines:
+            if re.match(r"^(?:Б\d|№\s|Код и наименование|Дисциплины|ФГОС|ПС\b|Б3ГИА|Директор|Заведующий|Преподаватель|Связь со стандартами|ПК-|УК-|ОПК-)", ln):
+                break
+            clean_lines.append(ln)
+        desc_raw = ' '.join(clean_lines).strip()
+
+        # Дополнительная усечка по часто встречающимся артефактам (закрывающая скобка + следующий блок, эмодзи и т.п.)
+        artifact_patterns = [r"\)\s*Б\d", r"\)\s*Б", r"\)\s*№", r"📘", r"📗", r"⚠️", r"№\s*Код", r"ФГОС", r"ПС\s*\d", r"Б3ГИА"]
+        earliest_art = None
+        for ap in artifact_patterns:
+            a = re.search(ap, desc_raw)
+            if a:
+                if earliest_art is None or a.start() < earliest_art:
+                    earliest_art = a.start()
+        if earliest_art is not None:
+            desc_raw = desc_raw[:earliest_art].strip()
+
+        # Убираем завершающие служебные символы и одиночные скобки
+        desc_raw = re.sub(r"[\-–—\)\(\[\]:;\.,]+$", "", desc_raw).strip()
+
+        # Фолбек: если описание слишком короткое, возьмём чуть более длинный фрагмент до ближайшего логичного конца
+        if len(re.sub(r"\s+", "", desc_raw)) < 8:
+            extra_end = min(len(cleaned), start + 400)
+            candidate_block = cleaned[start:extra_end]
+            # обрезаем candidate_block по стоп-паттернам
+            for pat in stop_patterns:
+                mm = re.search(pat, candidate_block)
+                if mm:
+                    candidate_block = candidate_block[:mm.start()]
+            candidate_block = re.sub(code_re, "", candidate_block).strip()
+            # также уберём стоп-подстроки
+            earliest2 = None
+            for s in stop_subs:
+                idx = candidate_block.find(s)
+                if idx != -1:
+                    if earliest2 is None or idx < earliest2:
+                        earliest2 = idx
+            if earliest2 is not None:
+                candidate_block = candidate_block[:earliest2].strip()
+            # и усечём артефакты в candidate_block
+            earliest_art2 = None
+            for ap in artifact_patterns:
+                a = re.search(ap, candidate_block)
+                if a:
+                    if earliest_art2 is None or a.start() < earliest_art2:
+                        earliest_art2 = a.start()
+            if earliest_art2 is not None:
+                candidate_block = candidate_block[:earliest_art2].strip()
+            if len(re.sub(r"\s+", "", candidate_block)) >= 8:
+                desc_raw = candidate_block
+
+        # Отбрасываем явно мусорные описания (нет букв)
+        if not re.search(r"[А-Яа-яA-Za-z]", desc_raw):
             continue
-        if len(clean_desc) > 400:
-            clean_desc = clean_desc[:400].rsplit('.', 1)[0] + "..."
-        competencies[clean_code] = f"{code} — {clean_desc}"
+
+        # Обрезаем лишнюю длину
+        if len(desc_raw) > 400:
+            desc_raw = desc_raw[:400].rsplit('.', 1)[0] + "..."
+
+        # Нормализуем ключ (убираем пробелы между префиксом и цифрами)
+        key = code_text.replace(" ", "")
+
+        competencies[key] = f"{code_text} — {desc_raw}"
+
     print("📘 Найдено компетенций:", len(competencies))
     return competencies
 
@@ -331,6 +459,30 @@ def extract_questions(file_path):
     return questions, None
 
 
+def find_comp_desc(key, competencies):
+    """Ищет описание компетенции по ключу.
+    Стратегия: точное совпадение -> поиск ключей, начинающихся с key -> поиск по цифровой части -> None
+    """
+    if key in competencies:
+        return competencies[key]
+
+    # Попытка найти более подробные ключи, начинающиеся с данного (например, УК5.3 -> УК5.3.1)
+    candidates = [ (k,v) for k,v in competencies.items() if k.startswith(key) or key.startswith(k) ]
+    if candidates:
+        # выбираем наиболее специфичный (самый длинный ключ)
+        best = max(candidates, key=lambda kv: len(kv[0]))
+        return best[1]
+
+    # Попытка сопоставления по цифровой части: сравниваем только цифры (например, 53 с 531)
+    digits = re.sub(r"\D", "", key)
+    if digits:
+        for k,v in competencies.items():
+            if digits and digits in re.sub(r"\D", "", k):
+                return v
+
+    return None
+
+
 # ---------- ГЕНЕРАЦИЯ ----------
 def extract_program_info(file_path):
     """Извлекает направление и профиль из документа компетенций"""
@@ -340,7 +492,7 @@ def extract_program_info(file_path):
 
     # Ищем строку вида: "по направлению 09.03.01   Информатика и вычислительная техника, профиль - ЭВМ, комплексы, системы и сети"
     match = re.search(
-        r"по\s+направлению\s+([\d\.]+\s*[А-Яа-яA-Za-zёЁ\s,]+?)\s*,?\s*профиль\s*[-–—]\s*([А-Яа-яA-Za-zёЁ\s,]+)",
+        r"по\s+направлению\s+([\d\.]+\s*[А-Яа-яA-ZazlёЁ\s,]+?)\s*,?\s*профиль\s*[-–—]\s*([А-Яа-яA-ZazlёЁ\s,]+)",
         full_text
     )
     if match:
@@ -376,11 +528,11 @@ def generate_files_per_discipline(user_dir, disciplines, competencies, questions
         style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
 
         # --- Название дисциплины ---
-        discipline_match = re.search(r"(Б\d+[А-ЯA-Za-zа-яёЁ0-9\s,\-–]+)", disc)
+        discipline_match = re.search(r"(Б\d+[А-ЯA-Zazlа-яёЁ0-9\s,\-–]+)", disc)
         discipline_name = discipline_match.group(1).strip() if discipline_match else "Неизвестная дисциплина"
 
         # --- Ищем коды компетенций ---
-        comp_codes = re.findall(r"((?:УК|ОПК|ПК)\s*\d+(?:\.\d+)?)", disc)
+        comp_codes = re.findall(r"((?:УК|ОПК|ПК)\s*\d+(?:\.\d+)*)", disc)
         if comp_codes:
             base = re.match(r"((?:УК|ОПК|ПК)\s*\d+)", comp_codes[0])
             short_comp_code = base.group(1).strip() if base else comp_codes[0]
@@ -438,8 +590,9 @@ def generate_files_per_discipline(user_dir, disciplines, competencies, questions
         # --- Основная часть: компетенции и вопросы ---
         for uk in comp_codes:
             uk_key = uk.replace(" ", "")
-            if uk_key in competencies:
-                desc = competencies[uk_key]
+            desc = find_comp_desc(uk_key, competencies)
+            if desc:
+                # desc уже в формате 'УК 1.1 — описание'
                 desc = re.sub(r"^" + re.escape(uk) + r"\s*[–-]?\s*", "", desc).strip()
                 desc = desc.lstrip("—").strip()
 
@@ -457,6 +610,11 @@ def generate_files_per_discipline(user_dir, disciplines, competencies, questions
 
                 doc.add_paragraph("\n")
 
+            else:
+                p = doc.add_paragraph()
+                p.add_run(f"⚠️ {uk} — описание не найдено.")
+                p.alignment = 1
+
         # --- Сохраняем файл ---
         filename = re.sub(r"[^A-Za-zА-Яа-я0-9]", "_", disc[:40]) + ".docx"
         file_path = os.path.join(user_dir, filename)
@@ -466,10 +624,58 @@ def generate_files_per_discipline(user_dir, disciplines, competencies, questions
     return generated
 
 
+def send_long_message(chat_id, text, parse_mode=None, reply_markup=None):
+    """Отправляет длинный текст частями (безопасно для Telegram)."""
+    MAX = 3500
+    # Разбиваем по параграфам, чтобы сохранять логические разделы
+    paragraphs = text.split('\n\n')
+    parts = []
+    cur = ''
+    for p in paragraphs:
+        p = p.strip()
+        if not p:
+            continue
+        candidate = (cur + '\n\n' + p) if cur else p
+        if len(candidate) <= MAX:
+            cur = candidate
+            continue
+        # candidate too big
+        if cur:
+            parts.append(cur)
+            cur = ''
+        # если один параграф сам по себе слишком большой — разбиваем по строкам
+        if len(p) <= MAX:
+            cur = p
+        else:
+            lines = p.split('\n')
+            cur2 = ''
+            for ln in lines:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                cand2 = (cur2 + '\n' + ln) if cur2 else ln
+                if len(cand2) <= MAX:
+                    cur2 = cand2
+                else:
+                    if cur2:
+                        parts.append(cur2)
+                    # если одна строка длиннее MAX — режем её
+                    if len(ln) > MAX:
+                        for i in range(0, len(ln), MAX):
+                            parts.append(ln[i:i+MAX])
+                        cur2 = ''
+                    else:
+                        cur2 = ln
+            if cur2:
+                cur = cur2
+    if cur:
+        parts.append(cur)
+
+    for i, part in enumerate(parts):
+        rm = reply_markup if i == len(parts) - 1 else None
+        bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=rm)
 
 
-
-# ---------- MAIN ----------
 if __name__ == "__main__":
     print("🤖 Бот запущен: поиск и генерация по найденным дисциплинам")
     bot.polling(none_stop=True)

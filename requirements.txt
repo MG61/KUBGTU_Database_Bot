@@ -1,0 +1,5 @@
+telebot~=0.0.5
+pyTelegramBotAPI~=4.25.0
+docx2txt~=0.9
+python-docx~=1.2.0
+gunicorn~=23.0.0
